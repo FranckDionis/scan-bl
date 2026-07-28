@@ -11,7 +11,7 @@
  * IMPORTANT : incrémenter CACHE_VERSION à chaque publication, sinon les
  * appareils déjà installés continueront de servir l'ancien index.html.
  */
-const CACHE_VERSION = 'scanbl-v13';
+const CACHE_VERSION = 'scanbl-v14';
 
 // Uniquement des ressources locales : tout est déjà embarqué dans index.html
 // (ZXing compris), il n'y a aucun CDN à mettre en cache.

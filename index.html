@@ -568,7 +568,7 @@
     <p class="help">Ouvre l'app Mail de votre iPhone avec un mail pré-rempli, prêt à envoyer.</p>
   </div>
 
-  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 13 · 28/07/2026</p>
+  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 14 · 28/07/2026</p>
 
 </div>
 
@@ -659,6 +659,27 @@
       🗑️ Nouvelle liste (efface les BL actuels)
     </button>
     <button class="btn btn-secondary" id="btn-choice-cancel" style="padding:28px; font-size:17px;">Annuler</button>
+  </div>
+</div>
+
+<!-- Modal de confirmation avant partage : copie des adresses PUIS ouverture d'Outlook -->
+<div class="modal-backdrop" id="share-confirm-modal">
+  <div class="modal">
+    <h2 style="margin:0 0 8px;">Destinataire à recopier</h2>
+    <p class="help" style="margin:0 0 12px;">
+      Avec une pièce jointe, iOS ne transmet pas le destinataire à Outlook.
+      L'appui ci-dessous copie ces adresses, puis ouvre le choix de l'application :
+      il n'y aura plus qu'à les coller dans le champ « À ».
+    </p>
+
+    <div id="share-confirm-addresses" style="background:#f5f5f7; border-radius:10px; padding:12px; font-size:14px; word-break:break-all; margin-bottom:8px; -webkit-user-select:text; user-select:text;"></div>
+    <p class="help" style="margin:0 0 4px;" id="share-confirm-info"></p>
+    <p class="help" style="margin:0 0 12px; color:#c0392b; display:none;" id="share-confirm-warning"></p>
+
+    <button class="btn btn-primary" id="btn-share-go" style="margin-bottom:8px; padding:24px; font-size:17px;">
+      📋 Copier et ouvrir Outlook
+    </button>
+    <button class="btn btn-secondary" id="btn-share-cancel" style="padding:20px; font-size:16px;">Annuler</button>
   </div>
 </div>
 
@@ -1841,6 +1862,73 @@ function buildMailtoUrl(recipient, cc, subject, body) {
   return url;
 }
 
+/* ---- Partage en deux temps (voir le commentaire dans le gestionnaire d'envoi) ---- */
+const shareConfirmModal = document.getElementById('share-confirm-modal');
+let pendingShare = null;
+
+function openShareConfirm({ recipient, cc, shareData, mailtoUrl, photoCount, totalBytes }) {
+  pendingShare = { recipient, cc, shareData, mailtoUrl };
+
+  document.getElementById('share-confirm-addresses').textContent =
+    cc ? `${recipient}, ${cc}` : recipient;
+
+  const mo = totalBytes / (1024 * 1024);
+  document.getElementById('share-confirm-info').textContent =
+    `${photoCount} photo${photoCount > 1 ? 's' : ''} en pièce jointe · ${mo.toFixed(1)} Mo`;
+
+  // Au-delà d'une dizaine de Mo, la feuille de partage devient très lente et le
+  // serveur mail du destinataire peut refuser le message.
+  const alerte = document.getElementById('share-confirm-warning');
+  if (mo > 10) {
+    alerte.textContent = '⚠️ Pièces jointes lourdes : l\'envoi peut être lent, voire refusé par le serveur mail.';
+    alerte.style.display = 'block';
+  } else {
+    alerte.style.display = 'none';
+  }
+
+  shareConfirmModal.classList.add('show');
+}
+
+document.getElementById('btn-share-cancel').addEventListener('click', () => {
+  shareConfirmModal.classList.remove('show');
+  pendingShare = null;
+});
+
+// Ce gestionnaire ne contient AUCUN await avant navigator.share() : la copie est
+// lancée sans être attendue, puis le partage est appelé dans la foulée. Les deux
+// partent ainsi du même geste utilisateur, encore valide. Les photos ont déjà
+// été chargées depuis IndexedDB à l'étape précédente, ce qui évite toute attente
+// ici — c'est le point qui rendait le partage fragile dans les versions 12 et 13.
+document.getElementById('btn-share-go').addEventListener('click', () => {
+  if (!pendingShare) return;
+  const { recipient, cc, shareData, mailtoUrl } = pendingShare;
+  const adresses = cc ? `${recipient}, ${cc}` : recipient;
+
+  let clipboardOk = false;
+  const clip = navigator.clipboard
+    ? navigator.clipboard.writeText(adresses).then(() => { clipboardOk = true; }).catch(() => {})
+    : Promise.resolve();
+
+  shareConfirmModal.classList.remove('show');
+
+  navigator.share(shareData).then(() => {
+    // Affiché seulement au retour : un bandeau présent pendant la feuille de
+    // partage occuperait la zone assombrie au-dessus d'elle, et le moindre
+    // appui dessus annulerait le partage.
+    return clip.then(() => {
+      showShareBanner(recipient, cc, clipboardOk);
+      toast(clipboardOk
+        ? 'Adresses copiées : collez-les dans « À »'
+        : 'Recopiez les adresses affichées en haut');
+    });
+  }).catch((err) => {
+    if (err && err.name === 'AbortError') return; // annulation utilisateur
+    console.error('share failed', err);
+    toast('⚠️ Partage impossible — mail SANS les photos');
+    window.location.href = mailtoUrl;
+  }).then(() => { pendingShare = null; });
+});
+
 document.getElementById('btn-send').addEventListener('click', async () => {
   const recipient = document.getElementById('recipient').value.trim();
   const cc = document.getElementById('cc').value.trim();
@@ -1852,19 +1940,6 @@ document.getElementById('btn-send').addEventListener('click', async () => {
   if (bls.length === 0) { toast('⚠️ Aucun BL à envoyer'); return; }
 
   hideShareBanner();
-
-  // Décide TOUT DE SUITE (donc de façon synchrone, blsWithPhoto est en mémoire)
-  // si on passera par navigator.share : cela conditionne la copie du destinataire.
-  const willShare = bls.some(b => blsWithPhoto.has(b));
-
-  // Copie des adresses AVANT le moindre await. Sur iOS, l'autorisation d'écrire
-  // dans le presse-papier est liée au geste utilisateur et ne survit pas à la
-  // feuille de partage : copier après navigator.share() échoue silencieusement.
-  const recipientLine = cc ? `${recipient}, ${cc}` : recipient;
-  let clipboardOk = false;
-  const clipboardDone = (willShare && navigator.clipboard)
-    ? navigator.clipboard.writeText(recipientLine).then(() => { clipboardOk = true; }).catch(() => {})
-    : Promise.resolve();
 
   // Stoppe le scan s'il est encore actif
   if (scanning) {
@@ -1931,33 +2006,24 @@ document.getElementById('btn-send').addEventListener('click', async () => {
     };
 
     if (navigator.canShare && navigator.canShare(shareData)) {
-      try {
-        await navigator.share(shareData);
-
-        // Le bandeau n'est affiché qu'APRÈS la feuille de partage, jamais avant.
-        // La feuille iOS ne couvre que le bas de l'écran : un bandeau affiché en
-        // haut se retrouve dans la zone assombrie, et le moindre appui dessus
-        // (typiquement sur « Copier ») est compris par iOS comme un appui à côté
-        // de la feuille, ce qui annule le partage en cours.
-        await clipboardDone;
-        showShareBanner(recipient, cc, clipboardOk);
-        toast(clipboardOk
-          ? 'Adresses copiées : collez-les dans le champ « À »'
-          : 'Recopiez les adresses affichées en haut');
-        return;
-      } catch (err) {
-        if (err.name === 'AbortError') {
-          return; // utilisateur a annulé, rien à afficher
-        }
-        console.error('share failed', err);
-        toast('⚠️ Partage impossible — mail SANS les photos');
-      }
-    } else {
-      toast('⚠️ Partage de fichiers non supporté — mail SANS les photos');
+      // Envoi avec photos en DEUX TEMPS. On n'ouvre pas la feuille de partage
+      // maintenant : on affiche d'abord les adresses, et c'est l'appui sur
+      // « Copier et ouvrir » qui déclenchera le partage.
+      // Raison : iOS n'autorise l'écriture dans le presse-papier que pendant un
+      // geste utilisateur, et l'ouverture de la feuille de partage met fin à ce
+      // geste. Grouper les deux dans un même appui, avec les photos déjà
+      // chargées, est la seule façon d'obtenir les deux de façon fiable.
+      const totalBytes = photoFiles.reduce((s, f) => s + f.size, 0);
+      openShareConfirm({
+        recipient, cc, shareData,
+        mailtoUrl: buildMailtoUrl(recipient, cc, subject,
+          buildMailBody({ ...bodyArgs, withPhotoMentions: false })),
+        photoCount: photoFiles.length,
+        totalBytes
+      });
+      return;
     }
-    // On tombe en repli mailto: les photos ne partiront pas, le bandeau
-    // d'adresses n'a plus lieu d'être (mailto pré-remplit destinataire et CC).
-    hideShareBanner();
+    toast('⚠️ Partage de fichiers non supporté — mail SANS les photos');
   }
 
   // Pas de photo, ou repli : mailto sans PJ, donc SANS mention de PJ dans le corps.
