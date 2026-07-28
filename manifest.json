@@ -1,0 +1,20 @@
+{
+  "name": "Scan BL",
+  "short_name": "Scan BL",
+  "description": "Scan des bons de livraison et envoi des confirmations par mail",
+  "lang": "fr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f5f5f7",
+  "theme_color": "#0F6E56",
+  "icons": [
+    {
+      "src": "icone.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

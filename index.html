@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-title" content="Scan BL">
 <meta name="theme-color" content="#0F6E56">
 <title>Scan BL</title>
+<link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='40' fill='%230F6E56'/%3E%3Cg fill='white'%3E%3Crect x='40' y='55' width='8' height='70'/%3E%3Crect x='54' y='55' width='4' height='70'/%3E%3Crect x='64' y='55' width='10' height='70'/%3E%3Crect x='80' y='55' width='4' height='70'/%3E%3Crect x='90' y='55' width='8' height='70'/%3E%3Crect x='104' y='55' width='4' height='70'/%3E%3Crect x='114' y='55' width='12' height='70'/%3E%3Crect x='132' y='55' width='4' height='70'/%3E%3C/g%3E%3C/svg%3E">
 
 <style>
@@ -372,6 +373,43 @@
     padding: 13px 14px;
     cursor: pointer;
   }
+  /* Bannière de mise à jour disponible (pilotée par le service worker) */
+  #update-banner {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    z-index: 1050;
+    display: none;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 12px calc(env(safe-area-inset-bottom) + 12px);
+    background: #0F6E56;
+    color: white;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.15);
+  }
+  #update-banner.show { display: flex; }
+  #update-banner .ub-text { flex: 1; font-size: 14px; font-weight: 600; }
+  #update-banner .ub-btn {
+    flex: 0 0 auto;
+    background: white;
+    color: #0F6E56;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 700;
+    font-family: inherit;
+    padding: 13px 16px;
+    cursor: pointer;
+  }
+  #update-banner .ub-close {
+    flex: 0 0 auto;
+    background: none;
+    border: none;
+    color: rgba(255,255,255,0.85);
+    font-size: 18px;
+    padding: 8px;
+    cursor: pointer;
+  }
+
   #share-banner .sb-close {
     flex: 0 0 auto;
     background: none;
@@ -436,6 +474,29 @@
         🏢 Clients
       </button>
     </div>
+
+    <hr style="border:none; border-top:1px solid #e5e5ea; margin:20px 0 12px;">
+    <h3 style="font-size:14px; font-weight:600; color:#3c3c43; margin:0 0 8px;">Sauvegarde</h3>
+    <p class="help" style="margin-top:0; margin-bottom:8px;">
+      Vos contacts, clients et réglages ne sont stockés que sur cet iPhone.
+      Exportez-les pour pouvoir les restaurer après un changement de téléphone.
+    </p>
+    <div style="display:flex; gap:8px;">
+      <button class="btn btn-secondary" id="btn-export" style="font-size:14px; padding:10px;">
+        📤 Exporter
+      </button>
+      <button class="btn btn-secondary" id="btn-import" style="font-size:14px; padding:10px;">
+        📥 Importer
+      </button>
+    </div>
+    <input type="file" id="import-file-input" accept="application/json,.json" style="display:none;">
+
+    <hr style="border:none; border-top:1px solid #e5e5ea; margin:20px 0 12px;">
+    <h3 style="font-size:14px; font-weight:600; color:#3c3c43; margin:0 0 8px;">Mise à jour</h3>
+    <button class="btn btn-secondary" id="btn-check-update" style="font-size:14px; padding:10px;">
+      🔄 Vérifier les mises à jour
+    </button>
+    <p class="help" id="update-status">L'application fonctionne hors-ligne.</p>
   </div>
 
   <!-- ===== SCANNER ===== -->
@@ -507,7 +568,7 @@
     <p class="help">Ouvre l'app Mail de votre iPhone avec un mail pré-rempli, prêt à envoyer.</p>
   </div>
 
-  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 12 · 28/07/2026</p>
+  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 13 · 28/07/2026</p>
 
 </div>
 
@@ -599,6 +660,37 @@
     </button>
     <button class="btn btn-secondary" id="btn-choice-cancel" style="padding:28px; font-size:17px;">Annuler</button>
   </div>
+</div>
+
+<!-- Modal sauvegarde : export / import des données -->
+<div class="modal-backdrop" id="backup-modal">
+  <div class="modal">
+    <h2 style="margin:0 0 8px;" id="backup-title">Sauvegarde</h2>
+    <p class="help" style="margin:0 0 12px;" id="backup-subtitle"></p>
+
+    <div id="backup-share-row" style="display:none;">
+      <button class="btn btn-primary" id="btn-backup-share" style="margin-bottom:8px; padding:16px;">
+        📨 Envoyer / enregistrer le fichier
+      </button>
+      <p class="help" style="margin:0 0 12px;">
+        Choisissez « Enregistrer dans Fichiers », ou envoyez-vous le fichier par mail.
+      </p>
+    </div>
+
+    <label for="backup-text" style="margin-top:0;" id="backup-text-label">Ou copiez ce texte et conservez-le :</label>
+    <textarea id="backup-text" style="min-height:140px; font-family:ui-monospace,'SF Mono',Menlo,monospace; font-size:12px;"></textarea>
+
+    <button class="btn btn-secondary" id="btn-backup-copy" style="margin-top:8px; padding:14px;">📋 Copier le texte</button>
+    <button class="btn btn-primary" id="btn-backup-apply" style="margin-top:8px; padding:16px; display:none;">✅ Restaurer ces données</button>
+    <button class="btn btn-secondary" id="btn-backup-close" style="margin-top:8px; padding:14px;">Fermer</button>
+  </div>
+</div>
+
+<!-- Bannière : nouvelle version disponible (service worker) -->
+<div id="update-banner">
+  <div class="ub-text">Une mise à jour de l'application est prête.</div>
+  <button type="button" class="ub-btn" id="btn-update-reload">Installer</button>
+  <button type="button" class="ub-close" id="btn-update-dismiss" aria-label="Plus tard">✕</button>
 </div>
 
 <!-- Rappel des adresses : navigator.share n'ouvre PAS Mail avec le destinataire -->
@@ -1694,10 +1786,13 @@ function renderClients(filter = '') {
 
 // Bandeau de rappel des adresses (le partage iOS ne les transmet pas à Mail)
 let shareBannerText = '';
-function showShareBanner(recipient, cc) {
+function showShareBanner(recipient, cc, copied) {
   shareBannerText = cc ? `${recipient}, ${cc}` : recipient;
+  const titre = copied
+    ? 'Adresses copiées — collez-les dans « À » :'
+    : '⚠️ À saisir dans « À » (copie automatique refusée) :';
   document.getElementById('share-banner-text').innerHTML =
-    `<strong>À saisir dans le champ « À » de Mail :</strong>${escapeHtml(shareBannerText)}`;
+    `<strong>${titre}</strong>${escapeHtml(shareBannerText)}`;
   document.getElementById('share-banner').classList.add('show');
 }
 function hideShareBanner() {
@@ -1837,23 +1932,22 @@ document.getElementById('btn-send').addEventListener('click', async () => {
 
     if (navigator.canShare && navigator.canShare(shareData)) {
       try {
-        // Le destinataire et le CC ne sont PAS transmis par navigator.share :
-        // on les affiche en clair avant d'ouvrir la feuille de partage.
-        // Affichage synchrone : surtout pas d'await ici, navigator.share exige
-        // une activation utilisateur encore valide.
-        showShareBanner(recipient, cc);
-
         await navigator.share(shareData);
 
+        // Le bandeau n'est affiché qu'APRÈS la feuille de partage, jamais avant.
+        // La feuille iOS ne couvre que le bas de l'écran : un bandeau affiché en
+        // haut se retrouve dans la zone assombrie, et le moindre appui dessus
+        // (typiquement sur « Copier ») est compris par iOS comme un appui à côté
+        // de la feuille, ce qui annule le partage en cours.
         await clipboardDone;
+        showShareBanner(recipient, cc, clipboardOk);
         toast(clipboardOk
-          ? 'Choisissez Mail, puis collez les adresses dans « À »'
-          : 'Choisissez Mail, puis recopiez les adresses affichées en haut');
+          ? 'Adresses copiées : collez-les dans le champ « À »'
+          : 'Recopiez les adresses affichées en haut');
         return;
       } catch (err) {
         if (err.name === 'AbortError') {
-          hideShareBanner();
-          return; // utilisateur a annulé
+          return; // utilisateur a annulé, rien à afficher
         }
         console.error('share failed', err);
         toast('⚠️ Partage impossible — mail SANS les photos');
@@ -1869,6 +1963,260 @@ document.getElementById('btn-send').addEventListener('click', async () => {
   // Pas de photo, ou repli : mailto sans PJ, donc SANS mention de PJ dans le corps.
   const body = buildMailBody({ ...bodyArgs, withPhotoMentions: false });
   window.location.href = buildMailtoUrl(recipient, cc, subject, body);
+});
+
+/* ============================================================
+   SAUVEGARDE : EXPORT / IMPORT
+   ============================================================ */
+// Les photos ne sont volontairement pas incluses : ce sont des preuves liées à
+// une tournée en cours, pas des données de configuration, et leur poids rendrait
+// le fichier inexploitable.
+const BACKUP_FORMAT = 'scanbl-backup-v1';
+const backupModal = document.getElementById('backup-modal');
+let backupMode = 'export'; // 'export' | 'import'
+
+function buildBackup() {
+  return {
+    format: BACKUP_FORMAT,
+    exportedAt: new Date().toISOString(),
+    contacts: contacts,
+    clients: clients,
+    settings: {
+      defaultRecipient: localStorage.getItem(STORAGE_KEYS.defaultRecipient) || '',
+      defaultCc: localStorage.getItem(STORAGE_KEYS.defaultCc) || '',
+      defaultClient: localStorage.getItem(STORAGE_KEYS.defaultClient) || '',
+      senderName: localStorage.getItem(STORAGE_KEYS.senderName) || '',
+      signature: localStorage.getItem(STORAGE_KEYS.signature) || ''
+    }
+  };
+}
+
+function openBackupModal(mode) {
+  backupMode = mode;
+  const isExport = mode === 'export';
+  document.getElementById('backup-title').textContent = isExport ? '📤 Exporter' : '📥 Importer';
+  document.getElementById('backup-share-row').style.display = isExport ? 'block' : 'none';
+  document.getElementById('btn-backup-copy').style.display = isExport ? 'flex' : 'none';
+  document.getElementById('btn-backup-apply').style.display = isExport ? 'none' : 'flex';
+  document.getElementById('backup-text').readOnly = isExport;
+
+  if (isExport) {
+    const data = buildBackup();
+    document.getElementById('backup-subtitle').textContent =
+      `${data.contacts.length} contact(s), ${data.clients.length} client(s) et vos réglages.`;
+    document.getElementById('backup-text-label').textContent = 'Ou copiez ce texte et conservez-le :';
+    document.getElementById('backup-text').value = JSON.stringify(data, null, 2);
+  } else {
+    document.getElementById('backup-subtitle').textContent =
+      'Choisissez un fichier de sauvegarde, ou collez son contenu ci-dessous.';
+    document.getElementById('backup-text-label').textContent = 'Contenu de la sauvegarde :';
+    document.getElementById('backup-text').value = '';
+  }
+  backupModal.classList.add('show');
+}
+
+document.getElementById('btn-export').addEventListener('click', () => openBackupModal('export'));
+document.getElementById('btn-backup-close').addEventListener('click', () => backupModal.classList.remove('show'));
+
+document.getElementById('btn-backup-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(document.getElementById('backup-text').value);
+    toast('✓ Sauvegarde copiée');
+  } catch (e) {
+    toast('Copie impossible — sélectionnez le texte à la main');
+  }
+});
+
+// Partage du fichier : sur iOS c'est le seul moyen fiable d'obtenir un vrai
+// fichier (« Enregistrer dans Fichiers » ou envoi par mail). Le téléchargement
+// par lien <a download> ne fonctionne pas en mode PWA plein écran.
+document.getElementById('btn-backup-share').addEventListener('click', async () => {
+  const json = JSON.stringify(buildBackup(), null, 2);
+  const stamp = todayISO();
+  const file = new File([json], `scan-bl-sauvegarde-${stamp}.json`, { type: 'application/json' });
+  const shareData = { files: [file], title: 'Sauvegarde Scan BL' };
+
+  if (navigator.canShare && navigator.canShare(shareData)) {
+    try {
+      await navigator.share(shareData);
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      console.error('share backup failed', err);
+    }
+  }
+  toast('Partage indisponible — copiez le texte ci-dessous');
+});
+
+document.getElementById('btn-import').addEventListener('click', () => {
+  openBackupModal('import');
+  document.getElementById('import-file-input').click();
+});
+
+document.getElementById('import-file-input').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    document.getElementById('backup-text').value = await file.text();
+    toast('Fichier chargé — vérifiez puis restaurez');
+  } catch (err) {
+    console.error(err);
+    toast('Lecture du fichier impossible');
+  }
+});
+
+document.getElementById('btn-backup-apply').addEventListener('click', () => {
+  let data;
+  try {
+    data = JSON.parse(document.getElementById('backup-text').value);
+  } catch (e) {
+    toast('⚠️ Contenu illisible : ce n\'est pas une sauvegarde valide');
+    return;
+  }
+  if (!data || data.format !== BACKUP_FORMAT) {
+    toast('⚠️ Ce fichier n\'est pas une sauvegarde Scan BL');
+    return;
+  }
+
+  // Fusion plutôt que remplacement : une restauration ne doit jamais faire
+  // perdre un contact ajouté depuis l'export.
+  let addedContacts = 0, addedClients = 0;
+  if (Array.isArray(data.contacts)) {
+    const seen = new Set(contacts.map(c => String(c.email).toLowerCase()));
+    for (const c of data.contacts) {
+      if (!c || !c.email || !c.name) continue;
+      const key = String(c.email).toLowerCase();
+      if (seen.has(key)) continue;
+      contacts.push({ name: String(c.name), email: String(c.email) });
+      seen.add(key);
+      addedContacts++;
+    }
+  }
+  if (Array.isArray(data.clients)) {
+    const seen = new Set(clients.map(c => String(c).toLowerCase()));
+    for (const c of data.clients) {
+      if (!c) continue;
+      const key = String(c).toLowerCase();
+      if (seen.has(key)) continue;
+      clients.push(String(c));
+      seen.add(key);
+      addedClients++;
+    }
+  }
+
+  // Les réglages ne sont restaurés que s'ils sont actuellement vides,
+  // pour ne pas écraser une configuration plus récente.
+  let restoredSettings = 0;
+  const s = data.settings || {};
+  const map = {
+    defaultRecipient: s.defaultRecipient, defaultCc: s.defaultCc,
+    defaultClient: s.defaultClient, senderName: s.senderName, signature: s.signature
+  };
+  for (const [k, v] of Object.entries(map)) {
+    if (v && !localStorage.getItem(STORAGE_KEYS[k])) {
+      localStorage.setItem(STORAGE_KEYS[k], v);
+      restoredSettings++;
+    }
+  }
+
+  localStorage.setItem(STORAGE_KEYS.contacts, JSON.stringify(contacts));
+  localStorage.setItem(STORAGE_KEYS.clients, JSON.stringify(clients));
+
+  backupModal.classList.remove('show');
+  toast(`✓ ${addedContacts} contact(s), ${addedClients} client(s), ${restoredSettings} réglage(s)`);
+
+  // Recharge pour que tous les champs pré-remplis reflètent les données restaurées
+  setTimeout(() => location.reload(), 1600);
+});
+
+/* ============================================================
+   SERVICE WORKER : hors-ligne + mises à jour maîtrisées
+   ============================================================ */
+// Objectif double : que l'app démarre sans réseau (entrepôt, sous-sol), et que
+// les mises à jour cessent d'être un mystère. Au lieu de « effacer l'historique
+// et réinstaller l'icône », l'app annonce elle-même qu'une version est prête.
+const updateBanner = document.getElementById('update-banner');
+let swRegistration = null;
+let pendingWorker = null;
+
+function showUpdateBanner(worker) {
+  pendingWorker = worker;
+  updateBanner.classList.add('show');
+  setUpdateStatus('Une mise à jour est prête à être installée.');
+}
+
+function setUpdateStatus(txt) {
+  const el = document.getElementById('update-status');
+  if (el) el.textContent = txt;
+}
+
+document.getElementById('btn-update-dismiss').addEventListener('click', () => {
+  updateBanner.classList.remove('show');
+});
+
+document.getElementById('btn-update-reload').addEventListener('click', () => {
+  if (!pendingWorker) { location.reload(); return; }
+  // Le nouveau service worker attend : on lui demande de prendre la main,
+  // puis on recharge dès qu'il contrôle la page.
+  pendingWorker.postMessage({ type: 'SKIP_WAITING' });
+  updateBanner.classList.remove('show');
+  toast('Installation…');
+});
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      swRegistration = reg;
+
+      if (reg.waiting && navigator.serviceWorker.controller) {
+        showUpdateBanner(reg.waiting);
+      }
+
+      reg.addEventListener('updatefound', () => {
+        const nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener('statechange', () => {
+          // controller absent = toute première installation, rien à annoncer
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+            showUpdateBanner(nw);
+          }
+        });
+      });
+    }).catch(err => {
+      console.warn('Service worker non enregistré :', err);
+      setUpdateStatus('Mode hors-ligne indisponible sur ce navigateur.');
+    });
+
+    // Rechargement unique une fois le nouveau worker aux commandes
+    let reloading = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (reloading) return;
+      reloading = true;
+      location.reload();
+    });
+  });
+} else {
+  setUpdateStatus('Mode hors-ligne indisponible sur ce navigateur.');
+}
+
+document.getElementById('btn-check-update').addEventListener('click', async () => {
+  if (!swRegistration) { toast('Mode hors-ligne indisponible'); return; }
+  setUpdateStatus('Vérification…');
+  try {
+    await swRegistration.update();
+    if (swRegistration.waiting) {
+      showUpdateBanner(swRegistration.waiting);
+      toast('Mise à jour disponible');
+    } else {
+      setUpdateStatus('Vous avez déjà la dernière version.');
+      toast('✓ Application à jour');
+    }
+  } catch (e) {
+    console.error(e);
+    setUpdateStatus('Vérification impossible (pas de réseau ?).');
+    toast('Vérification impossible');
+  }
 });
 
 /* ============================================================
