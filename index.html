@@ -568,7 +568,7 @@
     <p class="help">Ouvre l'app Mail de votre iPhone avec un mail pré-rempli, prêt à envoyer.</p>
   </div>
 
-  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 14 · 28/07/2026</p>
+  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 15 · 28/07/2026</p>
 
 </div>
 
@@ -1912,14 +1912,18 @@ document.getElementById('btn-share-go').addEventListener('click', () => {
   shareConfirmModal.classList.remove('show');
 
   navigator.share(shareData).then(() => {
-    // Affiché seulement au retour : un bandeau présent pendant la feuille de
-    // partage occuperait la zone assombrie au-dessus d'elle, et le moindre
-    // appui dessus annulerait le partage.
     return clip.then(() => {
-      showShareBanner(recipient, cc, clipboardOk);
-      toast(clipboardOk
-        ? 'Adresses copiées : collez-les dans « À »'
-        : 'Recopiez les adresses affichées en haut');
+      if (clipboardOk) {
+        // Cas normal : les adresses ont déjà été montrées dans la fenêtre de
+        // confirmation et sont dans le presse-papier. Un bandeau persistant ne
+        // ferait que répéter une information déjà utilisée et encombrer l'écran.
+        toast('Adresses copiées : collez-les dans « À »');
+        return;
+      }
+      // Seul cas où le bandeau sert vraiment : la copie a été refusée, il faut
+      // pouvoir relire les adresses (et retenter la copie) au retour dans l'app.
+      showShareBanner(recipient, cc, false);
+      toast('Copie refusée — adresses affichées en haut');
     });
   }).catch((err) => {
     if (err && err.name === 'AbortError') return; // annulation utilisateur
