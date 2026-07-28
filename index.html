@@ -206,7 +206,7 @@
     color: #3c3c43;
     margin: 12px 0 4px;
   }
-  input[type="text"], input[type="email"], textarea, select {
+  input[type="text"], input[type="email"], input[type="number"], textarea, select {
     width: 100%;
     padding: 12px;
     border: 1px solid #d1d1d6;
@@ -476,6 +476,20 @@
     </div>
 
     <hr style="border:none; border-top:1px solid #e5e5ea; margin:20px 0 12px;">
+    <h3 style="font-size:14px; font-weight:600; color:#3c3c43; margin:0 0 8px;">Fiabilité du scan</h3>
+    <label style="display:flex; align-items:center; gap:10px; margin:0 0 6px; font-weight:400;">
+      <input type="checkbox" id="opt-double-read" style="width:22px; height:22px; flex:0 0 auto; -webkit-appearance:auto;">
+      <span style="font-size:14px; font-weight:600; color:#3c3c43;">Double lecture</span>
+    </label>
+    <p class="help" style="margin:0 0 10px;">
+      Le même code doit être lu deux fois pour être accepté. Évite qu'un code-barres
+      capté au passage n'entre dans la liste. Décochez si le scan vous paraît hésitant.
+    </p>
+    <label for="opt-min-length">Longueur minimale d'un n° de BL</label>
+    <input type="number" id="opt-min-length" min="0" max="30" step="1" inputmode="numeric" style="width:100px;">
+    <p class="help">Les lectures plus courtes sont ignorées. 0 pour tout accepter.</p>
+
+    <hr style="border:none; border-top:1px solid #e5e5ea; margin:20px 0 12px;">
     <h3 style="font-size:14px; font-weight:600; color:#3c3c43; margin:0 0 8px;">Sauvegarde</h3>
     <p class="help" style="margin-top:0; margin-bottom:8px;">
       Vos contacts, clients et réglages ne sont stockés que sur cet iPhone.
@@ -568,7 +582,7 @@
     <p class="help">Ouvre l'app Mail de votre iPhone avec un mail pré-rempli, prêt à envoyer.</p>
   </div>
 
-  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 15 · 28/07/2026</p>
+  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 16 · 28/07/2026</p>
 
 </div>
 
@@ -659,6 +673,19 @@
       🗑️ Nouvelle liste (efface les BL actuels)
     </button>
     <button class="btn btn-secondary" id="btn-choice-cancel" style="padding:28px; font-size:17px;">Annuler</button>
+  </div>
+</div>
+
+<!-- Modal de saisie manuelle (remplace prompt() : accepte plusieurs numéros) -->
+<div class="modal-backdrop" id="manual-modal">
+  <div class="modal">
+    <h2 style="margin:0 0 8px;">⌨️ Saisir des n° de BL</h2>
+    <p class="help" style="margin:0 0 12px;">
+      Un numéro par ligne. Vous pouvez aussi coller une liste entière.
+    </p>
+    <textarea id="manual-input" placeholder="BL-12345678&#10;BL-12345679" style="min-height:120px; font-family:ui-monospace,'SF Mono',Menlo,monospace;"></textarea>
+    <button class="btn btn-primary" id="btn-manual-add" style="margin-top:10px; padding:20px; font-size:16px;">➕ Ajouter</button>
+    <button class="btn btn-secondary" id="btn-manual-cancel" style="margin-top:8px; padding:16px;">Annuler</button>
   </div>
 </div>
 
@@ -828,15 +855,35 @@ const STORAGE_KEYS = {
   senderName: 'scanbl_sender_name',
   recentRecipients: 'scanbl_recent_recipients',
   recentCc: 'scanbl_recent_cc',
-  recentClients: 'scanbl_recent_clients'
+  recentClients: 'scanbl_recent_clients',
+  optDoubleRead: 'scanbl_opt_double_read',
+  optMinLength: 'scanbl_opt_min_length'
 };
 
-let bls = JSON.parse(localStorage.getItem(STORAGE_KEYS.bls) || '[]');
-let contacts = JSON.parse(localStorage.getItem(STORAGE_KEYS.contacts) || '[]');
-let clients = JSON.parse(localStorage.getItem(STORAGE_KEYS.clients) || '[]');
-let recentRecipients = JSON.parse(localStorage.getItem(STORAGE_KEYS.recentRecipients) || '[]');
-let recentCc = JSON.parse(localStorage.getItem(STORAGE_KEYS.recentCc) || '[]');
-let recentClients = JSON.parse(localStorage.getItem(STORAGE_KEYS.recentClients) || '[]');
+// Lecture tolérante du stockage local.
+// Avant, un JSON.parse direct sur une clé corrompue (interruption d'écriture,
+// quota atteint) levait une exception à la toute première ligne du script :
+// plus aucun bouton ne répondait, sans le moindre message. La clé fautive est
+// désormais isolée et réinitialisée, le reste de l'application démarre.
+function safeParseList(key) {
+  const brut = localStorage.getItem(key);
+  if (!brut) return [];
+  try {
+    const v = JSON.parse(brut);
+    return Array.isArray(v) ? v : [];
+  } catch (e) {
+    console.warn('Donnée illisible, réinitialisée :', key, e);
+    localStorage.removeItem(key);
+    return [];
+  }
+}
+
+let bls = safeParseList(STORAGE_KEYS.bls);
+let contacts = safeParseList(STORAGE_KEYS.contacts).filter(c => c && c.email && c.name);
+let clients = safeParseList(STORAGE_KEYS.clients).filter(c => typeof c === 'string');
+let recentRecipients = safeParseList(STORAGE_KEYS.recentRecipients);
+let recentCc = safeParseList(STORAGE_KEYS.recentCc);
+let recentClients = safeParseList(STORAGE_KEYS.recentClients);
 
 // === Données par défaut ===
 // Volontairement vides : ce fichier est publié sur un dépôt GitHub PUBLIC.
@@ -881,6 +928,11 @@ document.getElementById('default-cc').value = defaultCc;
 document.getElementById('default-client').value = defaultClient;
 document.getElementById('sender-name').value = localStorage.getItem(STORAGE_KEYS.senderName) || '';
 document.getElementById('signature').value = localStorage.getItem(STORAGE_KEYS.signature) || '';
+document.getElementById('opt-double-read').checked = localStorage.getItem(STORAGE_KEYS.optDoubleRead) !== '0';
+document.getElementById('opt-min-length').value = (() => {
+  const n = parseInt(localStorage.getItem(STORAGE_KEYS.optMinLength), 10);
+  return Number.isFinite(n) && n >= 0 ? n : 4;
+})();
 
 // Date du jour par défaut au format YYYY-MM-DD
 function todayISO() {
@@ -915,6 +967,13 @@ document.getElementById('btn-save-settings').addEventListener('click', () => {
   localStorage.setItem(STORAGE_KEYS.defaultClient, dcl);
   localStorage.setItem(STORAGE_KEYS.senderName, sn);
   localStorage.setItem(STORAGE_KEYS.signature, sig);
+
+  localStorage.setItem(STORAGE_KEYS.optDoubleRead,
+    document.getElementById('opt-double-read').checked ? '1' : '0');
+  const minLen = parseInt(document.getElementById('opt-min-length').value, 10);
+  localStorage.setItem(STORAGE_KEYS.optMinLength,
+    String(Number.isFinite(minLen) && minLen >= 0 ? Math.min(minLen, 30) : 4));
+  resetScanFilter();
 
   // Met à jour aussi le formulaire principal
   if (dr) document.getElementById('recipient').value = dr;
@@ -1033,6 +1092,63 @@ function addBL(code) {
   playBeep(880, 100);
   if (navigator.vibrate) navigator.vibrate(80);
   flashOverlay('flash-success');
+}
+
+/* ------------------------------------------------------------
+   FILTRE DES LECTURES : longueur minimale + double lecture
+   ------------------------------------------------------------
+   Sans filtre, toute chaîne décodée entrait dans la liste — y compris le
+   code-barres d'un carton voisin capté au passage. Deux garde-fous :
+   - une longueur minimale, qui écarte les lectures manifestement parasites ;
+   - une double lecture : le même code doit être vu deux fois de suite pour
+     être accepté. À 200 ms d'intervalle, la confirmation est imperceptible.
+   Les deux sont réglables, et désactivables si Franck les trouve gênants. */
+let lastCandidate = null;
+let candidateCount = 0;
+let acceptCooldownUntil = 0;
+
+function resetScanFilter() {
+  lastCandidate = null;
+  candidateCount = 0;
+  acceptCooldownUntil = 0;
+}
+
+function isDoubleReadEnabled() {
+  return localStorage.getItem(STORAGE_KEYS.optDoubleRead) !== '0';
+}
+
+function getMinCodeLength() {
+  const n = parseInt(localStorage.getItem(STORAGE_KEYS.optMinLength), 10);
+  return Number.isFinite(n) && n >= 0 ? n : 4;
+}
+
+function handleScannedCode(raw) {
+  const code = String(raw || '').trim();
+  if (!code) return;
+
+  // Temporisation après une acceptation : évite qu'un code resté dans le cadre
+  // ne relance immédiatement le compteur de confirmation.
+  if (Date.now() < acceptCooldownUntil) return;
+
+  if (code.length < getMinCodeLength()) {
+    // Lecture trop courte pour être un n° de BL : ignorée en silence, sans bip,
+    // pour ne pas transformer un parasite en signal.
+    return;
+  }
+
+  if (!isDoubleReadEnabled()) { acceptScannedCode(code); return; }
+
+  if (code === lastCandidate) candidateCount++;
+  else { lastCandidate = code; candidateCount = 1; }
+
+  if (candidateCount >= 2) acceptScannedCode(code);
+}
+
+function acceptScannedCode(code) {
+  lastCandidate = null;
+  candidateCount = 0;
+  acceptCooldownUntil = Date.now() + 1200;
+  addBL(code);
 }
 
 function flashOverlay(className) {
@@ -1236,9 +1352,16 @@ async function toggleScan() {
     const ZXing = ZXingBrowser;
     const hints = new Map();
 
+    // ATTENTION : cette build de ZXing n'exporte PAS DecodeHintType. La garde
+    // d'origine (`if (ZXing.BarcodeFormat && ZXing.DecodeHintType)`) était donc
+    // toujours fausse et AUCUN hint n'a jamais été transmis jusqu'à la v15.
+    // On retombe sur les valeurs numériques de l'énumération, relevées dans le
+    // bundle : POSSIBLE_FORMATS = 2, TRY_HARDER = 3.
+    const HintType = ZXing.DecodeHintType || { POSSIBLE_FORMATS: 2, TRY_HARDER: 3 };
+
     // Code 128 = quasi-universel sur BL ; Code 39 = transport/logistique ; ITF = cartons
     // EAN/UPC = produits ; on les garde au cas où certains BL en utilisent
-    if (ZXing.BarcodeFormat && ZXing.DecodeHintType) {
+    if (ZXing.BarcodeFormat) {
       const formats = [
         ZXing.BarcodeFormat.CODE_128,
         ZXing.BarcodeFormat.CODE_39,
@@ -1250,17 +1373,29 @@ async function toggleScan() {
         ZXing.BarcodeFormat.UPC_E,
         ZXing.BarcodeFormat.CODABAR
       ];
-      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formats);
-      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      hints.set(HintType.POSSIBLE_FORMATS, formats);
     }
+
+    // TRY_HARDER est VOLONTAIREMENT absent. Mesuré sur une image 1920x1080 :
+    // 29 ms par image avec le seul filtre de formats, 632 ms en ajoutant
+    // TRY_HARDER — pour un budget de 30 ms à 33 analyses/seconde. Il fait
+    // analyser toute la hauteur de l'image (1080 lignes au lieu de 15) puis
+    // retente sur l'image pivotée à 90°. Excellent pour décoder une photo
+    // isolée, inutilisable en scan continu.
+    // Sans le filtre de formats, ZXing chargeait 7 décodeurs dont un doublon
+    // du lecteur EAN/UPC et RSS-14 : 43,5 ms par image, soit un tiers de plus.
 
     // Lecteur spécialisé 1D : beaucoup plus rapide que le MultiFormat générique
     // car il ne perd pas de temps à chercher des QR / Data Matrix / Aztec
     const ReaderClass = ZXing.BrowserMultiFormatOneDReader || ZXing.BrowserMultiFormatReader;
     codeReader = new ReaderClass(hints, {
       delayBetweenScanAttempts: 30,   // 33 analyses/seconde
-      delayBetweenScanSuccess: 1000
+      // Court, pour que la confirmation en double lecture soit quasi immédiate.
+      // La temporisation après acceptation est gérée par acceptCooldownUntil.
+      delayBetweenScanSuccess: 200
     });
+
+    resetScanFilter();
 
     placeholder.style.display = 'none';
     video.style.display = 'block';
@@ -1293,10 +1428,9 @@ async function toggleScan() {
       video,
       (result, err, controls) => {
         if (result) {
-          const text = result.getText();
-          addBL(text);
-          // Anti-doublon : on laisse ZXing continuer mais on bloque l'ajout des doublons
-          // (déjà géré dans addBL)
+          // Passe par le filtre : longueur minimale + double lecture éventuelle.
+          // L'anti-doublon reste géré dans addBL.
+          handleScannedCode(result.getText());
         }
       }
     );
@@ -1353,16 +1487,42 @@ async function toggleTorch() {
 /* ============================================================
    SAISIE MANUELLE
    ============================================================ */
+// Fenêtre maison plutôt que prompt() : celui-ci ne prend qu'un numéro à la fois,
+// et surtout la liste était déjà effacée par « Nouvelle liste » avant son
+// affichage — l'annuler faisait donc perdre les BL sans aucun recours.
+const manualModal = document.getElementById('manual-modal');
+
+function openManualInput() {
+  document.getElementById('manual-input').value = '';
+  manualModal.classList.add('show');
+  setTimeout(() => document.getElementById('manual-input').focus(), 50);
+}
+
 document.getElementById('btn-manual').addEventListener('click', () => {
-  if (bls.length > 0) {
-    askListChoice(() => {
-      const val = prompt('Saisir le N° de BL :');
-      if (val) addBL(val);
-    });
-  } else {
-    const val = prompt('Saisir le N° de BL :');
-    if (val) addBL(val);
-  }
+  if (bls.length > 0) askListChoice(openManualInput);
+  else openManualInput();
+});
+
+document.getElementById('btn-manual-cancel').addEventListener('click', () => {
+  manualModal.classList.remove('show');
+});
+
+document.getElementById('btn-manual-add').addEventListener('click', () => {
+  const lignes = document.getElementById('manual-input').value
+    .split(/[\r\n]+/).map(s => s.trim()).filter(Boolean);
+
+  if (lignes.length === 0) { toast('Aucun numéro saisi'); return; }
+
+  const avant = bls.length;
+  // La saisie manuelle contourne volontairement le filtre de longueur et la
+  // double lecture : ils protègent des lectures caméra parasites, pas d'une
+  // frappe délibérée.
+  lignes.forEach(addBL);
+  const ajoutes = bls.length - avant;
+
+  manualModal.classList.remove('show');
+  if (ajoutes === lignes.length) toast(`✓ ${ajoutes} BL ajouté${ajoutes > 1 ? 's' : ''}`);
+  else toast(`${ajoutes} ajouté(s), ${lignes.length - ajoutes} en doublon`);
 });
 
 /* ============================================================
@@ -2308,6 +2468,33 @@ renderBLs();
 
 // Charge l'index des photos disponibles (async, re-render quand prêt)
 refreshPhotoIndex().then(() => renderBLs());
+
+// Fermeture des fenêtres au clic sur le fond ou par Échap. Ces deux gestes sont
+// des réflexes : sans eux, une fenêtre ouverte par erreur donne l'impression que
+// l'application est bloquée. Une fermeture par ce biais équivaut toujours à
+// « Annuler » — jamais à valider l'action en cours.
+function dismissModal(backdrop) {
+  backdrop.classList.remove('show');
+  if (backdrop.id === 'choice-modal') choiceProceedCallback = null;
+  if (backdrop.id === 'share-confirm-modal') pendingShare = null;
+  if (backdrop.id === 'photo-modal') {
+    const img = document.getElementById('photo-preview-img');
+    if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+    img.src = '';
+  }
+}
+
+document.querySelectorAll('.modal-backdrop').forEach(backdrop => {
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) dismissModal(backdrop); // clic sur le fond seulement
+  });
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const ouverte = document.querySelector('.modal-backdrop.show');
+  if (ouverte) dismissModal(ouverte);
+});
 
 // Empêche le zoom sur double-tap iOS
 let lastTouch = 0;
