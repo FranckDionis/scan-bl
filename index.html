@@ -532,6 +532,11 @@
       <button class="btn btn-secondary" id="btn-torch" style="display:none; flex: 0 0 auto;">🔦 Flash</button>
       <button class="btn btn-secondary" id="btn-manual">⌨️ Saisir</button>
     </div>
+
+    <button class="btn btn-secondary" id="btn-decode-photo" style="margin-top:8px; font-size:14px; padding:12px;">
+      🔍 Code illisible ? Le photographier
+    </button>
+    <input type="file" id="decode-photo-input" accept="image/*" capture="environment" style="display:none;">
     <p class="help">Astuce&nbsp;: bonne lumière, tenez l'iPhone à ~15&nbsp;cm, et veillez à ce que le code occupe bien le cadre. Le flash aide en faible éclairage.</p>
   </div>
 
@@ -582,7 +587,7 @@
     <p class="help">Ouvre l'app Mail de votre iPhone avec un mail pré-rempli, prêt à envoyer.</p>
   </div>
 
-  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 16 · 28/07/2026</p>
+  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 17 · 29/07/2026</p>
 
 </div>
 
@@ -1482,6 +1487,118 @@ async function toggleTorch() {
     toast('Flash non disponible');
     torchOn = false;
   }
+}
+
+/* ============================================================
+   DÉCODAGE D'UNE PHOTO (codes abîmés, verticaux, mal imprimés)
+   ============================================================ */
+// Le scan continu doit tenir dans ~30 ms par image : il analyse 15 lignes et
+// ne tente pas l'image pivotée. Sur une photo isolée, ce budget n'existe pas.
+// On peut donc activer TRY_HARDER, qui analyse toute la hauteur de l'image et
+// retente à 90° — mesuré à ~630 ms, imperceptible pour un tir unique.
+// C'est le bon usage de ce réglage, et le rattrapage des codes que le scan
+// continu n'arrive pas à lire.
+const decodePhotoInput = document.getElementById('decode-photo-input');
+
+document.getElementById('btn-decode-photo').addEventListener('click', () => {
+  if (bls.length > 0) askListChoice(() => decodePhotoInput.click());
+  else decodePhotoInput.click();
+});
+
+decodePhotoInput.addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = ''; // permet de reprendre la même photo
+  if (!file) return;
+
+  const btn = document.getElementById('btn-decode-photo');
+  const libelle = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '🔍 Analyse en cours…';
+  // Laisse le navigateur repeindre : le décodage est synchrone et fige l'écran.
+  await new Promise(r => setTimeout(r, 60));
+
+  try {
+    const code = await decodeBarcodeFromFile(file);
+    if (code) {
+      // Comme la saisie manuelle, on court-circuite double lecture et longueur
+      // minimale : c'est un geste délibéré sur une photo choisie, pas une
+      // lecture opportuniste de la caméra.
+      addBL(code);
+    } else {
+      toast('Aucun code-barres lisible sur cette photo');
+      playBeep(330, 200);
+    }
+  } catch (err) {
+    console.error('Décodage photo impossible', err);
+    toast('Analyse impossible');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = libelle;
+  }
+});
+
+// Charge le fichier dans un canvas, en limitant la taille : une photo d'iPhone
+// fait 4032x3024, et TRY_HARDER analysant une ligne par pixel de hauteur, la
+// décoder telle quelle prendrait plusieurs secondes pour rien.
+function imageToCanvas(file, maxDim) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          const ratio = Math.min(maxDim / width, maxDim / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas);
+      };
+      img.onerror = () => reject(new Error('Image illisible'));
+      img.src = e.target.result;
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function decodeBarcodeFromFile(file) {
+  const Z = ZXingBrowser;
+  const HintType = Z.DecodeHintType || { POSSIBLE_FORMATS: 2, TRY_HARDER: 3 };
+
+  const formats1D = [
+    Z.BarcodeFormat.CODE_128, Z.BarcodeFormat.CODE_39, Z.BarcodeFormat.CODE_93,
+    Z.BarcodeFormat.ITF, Z.BarcodeFormat.EAN_13, Z.BarcodeFormat.EAN_8,
+    Z.BarcodeFormat.UPC_A, Z.BarcodeFormat.UPC_E, Z.BarcodeFormat.CODABAR
+  ];
+  const hints1D = new Map([[HintType.POSSIBLE_FORMATS, formats1D], [HintType.TRY_HARDER, true]]);
+  const hintsTous = new Map([[HintType.TRY_HARDER, true]]);
+
+  // Trois tentatives, de la plus probable à la plus coûteuse. La 2ᵉ monte en
+  // résolution pour les codes fins ou petits dans le cadre ; la 3ᵉ ouvre aux
+  // formats 2D, certains BL portant un QR code ou un Data Matrix.
+  const tentatives = [
+    { taille: 1600, lecteur: () => new Z.BrowserMultiFormatOneDReader(hints1D, {}) },
+    { taille: 2400, lecteur: () => new Z.BrowserMultiFormatOneDReader(hints1D, {}) },
+    { taille: 1600, lecteur: () => new Z.BrowserMultiFormatReader(hintsTous, {}) }
+  ];
+
+  for (const t of tentatives) {
+    const canvas = await imageToCanvas(file, t.taille);
+    try {
+      const res = t.lecteur().decodeFromCanvas(canvas);
+      if (res) return res.getText();
+    } catch (err) {
+      // NotFoundException attendue : on passe à la tentative suivante
+    }
+    await new Promise(r => setTimeout(r, 0)); // rend la main entre deux essais
+  }
+  return null;
 }
 
 /* ============================================================
