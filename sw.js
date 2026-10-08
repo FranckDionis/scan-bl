@@ -11,7 +11,7 @@
  * IMPORTANT : incrémenter CACHE_VERSION à chaque publication, sinon les
  * appareils déjà installés continueront de servir l'ancien index.html.
  */
-const CACHE_VERSION = 'scanbl-v18';
+const CACHE_VERSION = 'scanbl-v19';
 
 // Uniquement des ressources locales : tout est déjà embarqué dans index.html
 // (ZXing compris), il n'y a aucun CDN à mettre en cache.
@@ -60,10 +60,22 @@ self.addEventListener('fetch', (event) => {
   // Navigation (ouverture de l'app) : le cache d'abord, pour un démarrage
   // instantané et fiable même sans réseau. La mise à jour éventuelle est
   // détectée par le navigateur sur sw.js, et signalée dans l'interface.
+  //
+  // Seule l'adresse de l'app elle-même est servie depuis le cache. La version
+  // précédente renvoyait index.html pour TOUTE navigation de même origine :
+  // n'importe quelle autre page du site (diag.html par exemple) était masquée
+  // par l'application dès le service worker installé.
   if (req.mode === 'navigate') {
-    event.respondWith(
-      caches.match('./index.html').then((hit) => hit || fetch(req))
-    );
+    const racine = new URL('./', self.location).pathname;
+    const chemin = new URL(req.url).pathname;
+    if (chemin === racine || chemin === racine + 'index.html') {
+      event.respondWith(
+        caches.match('./index.html').then((hit) => hit || fetch(req))
+      );
+    } else {
+      // Page annexe : le réseau d'abord, le cache seulement en secours.
+      event.respondWith(fetch(req).catch(() => caches.match(req)));
+    }
     return;
   }
 

@@ -490,6 +490,19 @@
     <input type="number" id="opt-min-length" min="0" max="30" step="1" inputmode="numeric" style="width:100px;">
     <p class="help">Les lectures plus courtes sont ignorées. 0 pour tout accepter.</p>
 
+    <label for="opt-camera" style="margin-top:10px; display:block;">Objectif de la caméra</label>
+    <select id="opt-camera" style="width:100%; font:inherit; padding:10px; border:1px solid #d1d1d6; border-radius:10px; background:#fff;">
+      <option value="">Automatique</option>
+    </select>
+    <p class="help">
+      Certains Android exposent plusieurs caméras arrière, dont des objectifs incapables de faire
+      la mise au point : le scan ne lit alors jamais rien. L'app en retient un qui sait. En cas de
+      doute, détectez-les et choisissez vous-même.
+    </p>
+    <button class="btn btn-secondary" id="btn-detect-camera" style="font-size:14px; padding:10px;">
+      🎥 Détecter les objectifs
+    </button>
+
     <hr style="border:none; border-top:1px solid #e5e5ea; margin:20px 0 12px;">
     <h3 style="font-size:14px; font-weight:600; color:#3c3c43; margin:0 0 8px;">Sauvegarde</h3>
     <p class="help" style="margin-top:0; margin-bottom:8px;">
@@ -588,7 +601,7 @@
     <p class="help">Ouvre l'app Mail de votre iPhone avec un mail pré-rempli, prêt à envoyer.</p>
   </div>
 
-  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 18 · 04/09/2026</p>
+  <p style="text-align:center; font-size:11px; color:#b0b0b5; margin:8px 0 4px;">Scan BL · version 19 · 08/10/2026</p>
 
 </div>
 
@@ -863,7 +876,8 @@ const STORAGE_KEYS = {
   recentCc: 'scanbl_recent_cc',
   recentClients: 'scanbl_recent_clients',
   optDoubleRead: 'scanbl_opt_double_read',
-  optMinLength: 'scanbl_opt_min_length'
+  optMinLength: 'scanbl_opt_min_length',
+  camera: 'scanbl_camera_id'
 };
 
 // Lecture tolérante du stockage local.
@@ -939,6 +953,61 @@ document.getElementById('opt-min-length').value = (() => {
   const n = parseInt(localStorage.getItem(STORAGE_KEYS.optMinLength), 10);
   return Number.isFinite(n) && n >= 0 ? n : 4;
 })();
+
+/* --- Choix manuel de l'objectif ------------------------------------------ */
+// Ne se remplit que sur demande : énumérer les caméras suppose d'ouvrir chacune
+// d'elles, ce qu'on ne fait pas à la simple ouverture des réglages.
+document.getElementById('opt-camera').addEventListener('change', (e) => {
+  if (e.target.value) localStorage.setItem(STORAGE_KEYS.camera, e.target.value);
+  else localStorage.removeItem(STORAGE_KEYS.camera);
+  toast(e.target.value ? 'Objectif enregistré' : 'Choix automatique rétabli');
+});
+
+document.getElementById('btn-detect-camera').addEventListener('click', async (e) => {
+  const btn = e.currentTarget;
+  const sel = document.getElementById('opt-camera');
+  const libelle = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '🎥 Détection…';
+  try {
+    // Une première autorisation est nécessaire pour obtenir les libellés.
+    const amorce = await navigator.mediaDevices.getUserMedia({ video: true });
+    amorce.getTracks().forEach(t => t.stop());
+
+    const memo = localStorage.getItem(STORAGE_KEYS.camera) || '';
+    sel.innerHTML = '<option value="">Automatique</option>';
+    let trouves = 0;
+
+    for (const d of (await navigator.mediaDevices.enumerateDevices()).filter(x => x.kind === 'videoinput')) {
+      let flux = null;
+      try {
+        flux = await navigator.mediaDevices.getUserMedia({
+          audio: false, video: { deviceId: { exact: d.deviceId } }
+        });
+        const track = flux.getVideoTracks()[0];
+        const caps = track.getCapabilities ? track.getCapabilities() : {};
+        const st = track.getSettings ? track.getSettings() : {};
+        if (st.facingMode === 'user') continue;   // objectif frontal : sans intérêt ici
+        const opt = document.createElement('option');
+        opt.value = d.deviceId;
+        opt.textContent = (d.label || 'Caméra ' + (trouves + 1)) +
+          (aAutofocus(caps) ? ' — mise au point ✓' : ' — SANS mise au point');
+        if (d.deviceId === memo) opt.selected = true;
+        sel.appendChild(opt);
+        trouves++;
+      } catch (err) {
+        // Objectif inaccessible : on l'ignore plutôt que d'interrompre la liste.
+      } finally {
+        if (flux) flux.getTracks().forEach(t => t.stop());
+      }
+    }
+    toast(trouves ? trouves + ' objectif(s) détecté(s)' : 'Aucun objectif arrière détecté');
+  } catch (err) {
+    toast('⚠️ Caméra inaccessible : ' + (err && err.name));
+  }
+  btn.disabled = false;
+  btn.textContent = libelle;
+});
 
 // Date du jour par défaut au format YYYY-MM-DD
 function todayISO() {
@@ -1247,6 +1316,70 @@ function capitalize(w) {
 }
 
 /* ============================================================
+   CHOIX DE L'OBJECTIF ARRIÈRE
+   ============================================================ */
+// Sur Android, `facingMode: 'environment'` laisse le navigateur choisir parmi
+// les objectifs arrière, et Chrome retient souvent un ultra-grand-angle ou un
+// capteur macro INCAPABLE de faire la mise au point. Le viseur paraît correct,
+// mais l'image reste floue à distance de lecture et aucun code n'est décodé.
+//
+// Mesuré sur Android 10 / Chrome 154, téléphone à quatre objectifs :
+//   « camera 2, facing back » focusMode ["manual"], sans flash  -> rien, jamais
+//   « camera 0, facing back » focusMode [...,"continuous"]      -> lu en 17 ms
+// Même BL, même décodeur : seul l'objectif changeait.
+//
+// On désigne donc explicitement un objectif qui sait faire le point, et on
+// mémorise son deviceId. Safari ne renseigne pas `focusMode` dans
+// getCapabilities() : la détection ne s'y déclenche jamais, et l'iPhone
+// conserve exactement le comportement d'avant.
+
+function aAutofocus(caps) {
+  return Array.isArray(caps && caps.focusMode) && caps.focusMode.includes('continuous');
+}
+
+// Ouvre brièvement chaque objectif : c'est le seul moyen de connaître ses
+// capacités réelles. Renvoie le deviceId du meilleur objectif arrière, ou null.
+async function choisirObjectifArriere() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return null;
+  let candidats;
+  try {
+    candidats = (await navigator.mediaDevices.enumerateDevices())
+      .filter(d => d.kind === 'videoinput');
+  } catch (e) { return null; }
+
+  // Les libellés ne sont fournis qu'une fois la caméra autorisée. Quand ils le
+  // sont, ils évitent d'allumer inutilement les objectifs frontaux.
+  if (candidats.length > 1 && candidats.every(d => d.label)) {
+    const arriere = candidats.filter(d => /back|rear|arri/i.test(d.label));
+    if (arriere.length) candidats = arriere;
+  }
+
+  let meilleur = null, meilleurScore = -1;
+  for (const d of candidats) {
+    let flux = null;
+    try {
+      flux = await navigator.mediaDevices.getUserMedia({
+        audio: false, video: { deviceId: { exact: d.deviceId } }
+      });
+      const track = flux.getVideoTracks()[0];
+      const caps = track.getCapabilities ? track.getCapabilities() : {};
+      const st = track.getSettings ? track.getSettings() : {};
+      if (st.facingMode && st.facingMode !== 'environment') continue;
+      if (!aAutofocus(caps)) continue;
+      // À égalité, on préfère l'objectif qui porte le flash — c'est le capteur
+      // principal — puis celui qui monte le plus haut en résolution.
+      const score = (caps.torch ? 1e9 : 0) + ((caps.width && caps.width.max) || 0);
+      if (score > meilleurScore) { meilleurScore = score; meilleur = d.deviceId; }
+    } catch (e) {
+      // Objectif inaccessible (déjà occupé, ou refusé) : on passe au suivant.
+    } finally {
+      if (flux) flux.getTracks().forEach(t => t.stop());
+    }
+  }
+  return meilleur;
+}
+
+/* ============================================================
    SCANNER (ZXing) - optimisé
    ============================================================ */
 let codeReader = null;
@@ -1412,53 +1545,78 @@ async function toggleScan() {
     btn.classList.add('btn-danger');
     scanning = true;
 
-    // Contraintes vidéo : haute résolution + caméra arrière + autofocus continu
-    const constraints = {
-      audio: false,
-      video: {
-        facingMode: { ideal: 'environment' },
-        width:  { ideal: 1920 },
-        height: { ideal: 1080 },
-        frameRate: { ideal: 30 },
-        focusMode: 'continuous',
-        advanced: [
-          { focusMode: 'continuous' },
-          { exposureMode: 'continuous' },
-          { whiteBalanceMode: 'continuous' }
-        ]
+    // Contraintes vidéo : haute résolution + caméra arrière + autofocus continu.
+    // Si un objectif a déjà été retenu, on le désigne explicitement plutôt que
+    // de laisser le navigateur choisir (voir choisirObjectifArriere).
+    const reglagesVideo = {
+      width:  { ideal: 1920 },
+      height: { ideal: 1080 },
+      frameRate: { ideal: 30 },
+      focusMode: 'continuous',
+      advanced: [
+        { focusMode: 'continuous' },
+        { exposureMode: 'continuous' },
+        { whiteBalanceMode: 'continuous' }
+      ]
+    };
+    const idObjectif = localStorage.getItem(STORAGE_KEYS.camera) || '';
+    if (idObjectif) reglagesVideo.deviceId = { exact: idObjectif };
+    else reglagesVideo.facingMode = { ideal: 'environment' };
+    const constraints = { audio: false, video: reglagesVideo };
+
+    const surLecture = (result) => {
+      if (result) {
+        // Passe par le filtre : longueur minimale + double lecture éventuelle.
+        // L'anti-doublon reste géré dans addBL.
+        handleScannedCode(result.getText());
       }
     };
 
-    scanControls = await codeReader.decodeFromConstraints(
-      constraints,
-      video,
-      (result, err, controls) => {
-        if (result) {
-          // Passe par le filtre : longueur minimale + double lecture éventuelle.
-          // L'anti-doublon reste géré dans addBL.
-          handleScannedCode(result.getText());
-        }
-      }
-    );
+    try {
+      scanControls = await codeReader.decodeFromConstraints(constraints, video, surLecture);
+    } catch (err) {
+      // `deviceId: { exact }` échoue si l'objectif mémorisé n'existe plus
+      // (autre téléphone, autorisations réinitialisées). On l'oublie et on
+      // repart du comportement par défaut plutôt que de laisser le scan mort.
+      if (!idObjectif) throw err;
+      localStorage.removeItem(STORAGE_KEYS.camera);
+      delete reglagesVideo.deviceId;
+      reglagesVideo.facingMode = { ideal: 'environment' };
+      scanControls = await codeReader.decodeFromConstraints(constraints, video, surLecture);
+    }
 
     // Récupère le track vidéo pour activer la torche / vérifier les capabilities
-    setTimeout(() => {
-      if (video.srcObject) {
-        currentVideoTrack = video.srcObject.getVideoTracks()[0];
-        if (currentVideoTrack) {
-          const caps = currentVideoTrack.getCapabilities ? currentVideoTrack.getCapabilities() : {};
-          // Affiche le bouton torche si supporté
-          if (caps.torch) {
-            torchBtn.style.display = 'flex';
-          }
-          // Force la mise au point continue si supporté
-          if (caps.focusMode && caps.focusMode.includes('continuous')) {
-            currentVideoTrack.applyConstraints({
-              advanced: [{ focusMode: 'continuous' }]
-            }).catch(() => {});
-          }
-        }
+    setTimeout(async () => {
+      if (!video.srcObject) return;
+      currentVideoTrack = video.srcObject.getVideoTracks()[0];
+      if (!currentVideoTrack) return;
+
+      const caps = currentVideoTrack.getCapabilities ? currentVideoTrack.getCapabilities() : {};
+      // Affiche le bouton torche si supporté
+      if (caps.torch) torchBtn.style.display = 'flex';
+
+      // Force la mise au point continue si supporté
+      if (aAutofocus(caps)) {
+        currentVideoTrack.applyConstraints({
+          advanced: [{ focusMode: 'continuous' }]
+        }).catch(() => {});
+        return;
       }
+
+      // Cet objectif ne sait pas faire le point. On ne cherche mieux que si le
+      // navigateur l'annonce explicitement : Safari laisse focusMode vide, et
+      // il ne faut surtout pas déclencher cette bascule sur l'iPhone, où le
+      // scan fonctionne. On ne la déclenche pas non plus si l'objectif a déjà
+      // été choisi, pour éviter toute boucle.
+      if (!Array.isArray(caps.focusMode) || idObjectif || !scanning) return;
+      const actuel = currentVideoTrack.getSettings ? currentVideoTrack.getSettings().deviceId : null;
+      const meilleur = await choisirObjectifArriere();
+      if (!meilleur || meilleur === actuel || !scanning) return;
+
+      localStorage.setItem(STORAGE_KEYS.camera, meilleur);
+      toast('Objectif changé : celui-ci fait la mise au point');
+      await toggleScan();   // arrêt
+      await toggleScan();   // redémarrage sur le bon objectif
     }, 500);
 
   } catch (err) {
