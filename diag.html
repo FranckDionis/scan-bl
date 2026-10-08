@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scan BL — diagnostic</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'%3E%3Crect width='180' height='180' rx='40' fill='%230F6E56'/%3E%3Cg fill='white'%3E%3Crect x='40' y='55' width='8' height='70'/%3E%3Crect x='54' y='55' width='4' height='70'/%3E%3Crect x='64' y='55' width='10' height='70'/%3E%3Crect x='80' y='55' width='4' height='70'/%3E%3Crect x='90' y='55' width='8' height='70'/%3E%3Crect x='104' y='55' width='4' height='70'/%3E%3Crect x='114' y='55' width='12' height='70'/%3E%3Crect x='132' y='55' width='4' height='70'/%3E%3C/g%3E%3C/svg%3E">
+<style>
+  :root { --vert:#0F6E56; --ok:#1a7f37; --ko:#b42318; --gris:#6b6b70; }
+  * { box-sizing:border-box; -webkit-text-size-adjust:100%; }
+  body { margin:0; padding:16px; font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         background:#f5f5f7; color:#1c1c1e; }
+  h1 { font-size:19px; margin:0 0 4px; color:var(--vert); }
+  .sous { color:var(--gris); font-size:13px; margin:0 0 16px; }
+  section { background:#fff; border-radius:12px; padding:14px; margin-bottom:14px; }
+  h2 { font-size:15px; margin:0 0 6px; }
+  p.aide { font-size:13px; color:var(--gris); margin:0 0 10px; }
+  button { font:inherit; font-weight:600; padding:12px 16px; border:0; border-radius:10px;
+           background:var(--vert); color:#fff; width:100%; margin-bottom:8px; }
+  button.secondaire { background:#e8e8ed; color:#1c1c1e; }
+  button:disabled { opacity:.5; }
+  label.fichier { display:block; font:inherit; font-weight:600; padding:12px 16px; border-radius:10px;
+                  background:var(--vert); color:#fff; text-align:center; margin-bottom:8px; }
+  input[type=file] { display:none; }
+  canvas, video { max-width:100%; border:1px solid #d8d8dd; border-radius:8px; display:none; margin-top:8px; }
+  pre { background:#1c1c1e; color:#e8e8ed; padding:12px; border-radius:10px; font-size:11.5px;
+        line-height:1.5; white-space:pre-wrap; word-break:break-word; margin:0; }
+  .verdict { font-weight:700; }
+  .verdict.ok { color:var(--ok); }
+  .verdict.ko { color:var(--ko); }
+</style>
+</head>
+<body>
+
+<h1>Scan BL — diagnostic</h1>
+<p class="sous">Page de test, séparée de l'application. À ouvrir en <strong>navigation privée</strong>
+(sinon le service worker renvoie l'app à la place de cette page).</p>
+
+<section>
+  <h2>1. Décodage sans caméra</h2>
+  <p class="aide">Le test décisif : un code-barres dessiné par la page elle-même, donc parfaitement net.
+  S'il échoue, la caméra n'y est pour rien.</p>
+  <button id="btn-t1">Lancer le test 1</button>
+  <canvas id="cv-ref"></canvas>
+</section>
+
+<section>
+  <h2>2. Photo d'un vrai code-barres</h2>
+  <p class="aide">Reproduit exactement le bouton « Code illisible ? Le photographier » de l'app.</p>
+  <label class="fichier" for="f-photo">Prendre une photo</label>
+  <input type="file" id="f-photo" accept="image/*" capture="environment">
+  <canvas id="cv-photo"></canvas>
+</section>
+
+<section>
+  <h2>3. Caméra en direct</h2>
+  <p class="aide">Ouvre la caméra avec les contraintes de l'app, capture une image et la décode de
+  quatre façons. Cadre un code-barres avant d'appuyer.</p>
+  <button id="btn-cam">Ouvrir la caméra</button>
+  <video id="video" playsinline muted></video>
+  <button id="btn-grab" class="secondaire" disabled>Capturer et décoder</button>
+  <canvas id="cv-cam"></canvas>
+</section>
+
+<section>
+  <h2>Rapport</h2>
+  <button id="btn-copier" class="secondaire">Copier le rapport</button>
+  <pre id="rapport">En attente…</pre>
+</section>
+
+<script src="zxing.js"></script>
+<script>
+/* ============================================================
+   RAPPORT
+   ============================================================ */
+const lignes = [];
+const elRapport = document.getElementById('rapport');
+
+function log(txt) { lignes.push(txt); elRapport.textContent = lignes.join('\n'); }
+function titre(txt) { log(''); log('=== ' + txt + ' ==='); }
+
+/* ============================================================
+   ENVIRONNEMENT
+   ============================================================ */
+titre('ENVIRONNEMENT');
+log('date      : ' + new Date().toISOString());
+log('UA        : ' + navigator.userAgent);
+log('plateforme: ' + (navigator.platform || '?') + ' | coeurs : ' + (navigator.hardwareConcurrency || '?'));
+log('secure    : ' + window.isSecureContext + ' | origine : ' + location.origin);
+log('ecran     : ' + screen.width + 'x' + screen.height + ' @' + window.devicePixelRatio + 'x');
+log('ZXing     : ' + (window.ZXingBrowser ? Object.keys(ZXingBrowser).length + ' exports' : 'NON CHARGE'));
+if (window.ZXingBrowser) {
+  log('  BarcodeFormat  : ' + typeof ZXingBrowser.BarcodeFormat +
+      ' (CODE_39=' + (ZXingBrowser.BarcodeFormat && ZXingBrowser.BarcodeFormat.CODE_39) + ')');
+  log('  DecodeHintType : ' + typeof ZXingBrowser.DecodeHintType + ' (absent de ce bundle, attendu)');
+}
+const sc = navigator.mediaDevices && navigator.mediaDevices.getSupportedConstraints
+  ? navigator.mediaDevices.getSupportedConstraints() : {};
+log('contraintes supportees : focusMode=' + !!sc.focusMode + ' torch=' + !!sc.torch +
+    ' exposureMode=' + !!sc.exposureMode);
+
+/* ============================================================
+   LECTEURS — mêmes réglages que l'application
+   ============================================================ */
+const Z = window.ZXingBrowser || {};
+const HintType = Z.DecodeHintType || { POSSIBLE_FORMATS: 2, TRY_HARDER: 3 };
+const formats1D = Z.BarcodeFormat ? [
+  Z.BarcodeFormat.CODE_128, Z.BarcodeFormat.CODE_39, Z.BarcodeFormat.CODE_93,
+  Z.BarcodeFormat.ITF, Z.BarcodeFormat.EAN_13, Z.BarcodeFormat.EAN_8,
+  Z.BarcodeFormat.UPC_A, Z.BarcodeFormat.UPC_E, Z.BarcodeFormat.CODABAR
+] : [];
+
+// Les quatre configurations à comparer. « scan continu » est celle qui tourne
+// 33 fois par seconde dans l'app ; « photo » celle du bouton loupe.
+function configurations() {
+  const h1 = new Map([[HintType.POSSIBLE_FORMATS, formats1D]]);
+  const h2 = new Map([[HintType.POSSIBLE_FORMATS, formats1D], [HintType.TRY_HARDER, true]]);
+  const h3 = new Map([[HintType.TRY_HARDER, true]]);
+  return [
+    { nom: 'scan continu (1D + formats)',   f: () => new Z.BrowserMultiFormatOneDReader(h1, {}) },
+    { nom: 'photo (1D + formats + HARDER)', f: () => new Z.BrowserMultiFormatOneDReader(h2, {}) },
+    { nom: 'tous formats + HARDER',         f: () => new Z.BrowserMultiFormatReader(h3, {}) },
+    { nom: 'aucun hint (reglages d usine)', f: () => new Z.BrowserMultiFormatOneDReader(undefined, {}) }
+  ];
+}
+
+function essayer(canvas, etiquette) {
+  let trouve = null;
+  for (const c of configurations()) {
+    const t0 = performance.now();
+    let issue;
+    try {
+      const res = c.f().decodeFromCanvas(canvas);
+      issue = res ? 'LU « ' + res.getText() + ' » [' + res.getBarcodeFormat() + ']' : 'null';
+      if (res && !trouve) trouve = res.getText();
+    } catch (err) {
+      issue = (err && err.name) || 'Erreur';
+      if (err && err.message && !/not *found/i.test(err.message)) issue += ' : ' + err.message;
+    }
+    log('  ' + etiquette + ' | ' + c.nom.padEnd(32) + ' ' +
+        String(Math.round(performance.now() - t0)).padStart(5) + ' ms  ' + issue);
+  }
+  return trouve;
+}
+
+/* ============================================================
+   ANALYSE DES PIXELS — détecte un canvas noir, blanc ou vide
+   ============================================================ */
+function statsPixels(canvas) {
+  try {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let min = 255, max = 0, somme = 0, n = 0, opaques = 0;
+    // Un pixel sur 97 suffit, et reste rapide sur une photo de 12 Mpx.
+    for (let i = 0; i < d.length; i += 4 * 97) {
+      const l = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000;
+      if (l < min) min = l;
+      if (l > max) max = l;
+      somme += l; n++;
+      if (d[i + 3] > 0) opaques++;
+    }
+    const contraste = max - min;
+    return { min: Math.round(min), max: Math.round(max), moy: Math.round(somme / n),
+             contraste: Math.round(contraste), opaques: Math.round(100 * opaques / n) };
+  } catch (err) {
+    return { erreur: (err && err.name) + ' : ' + (err && err.message) };
+  }
+}
+
+function logStats(canvas, etiquette) {
+  const s = statsPixels(canvas);
+  if (s.erreur) { log('  ' + etiquette + ' pixels ILLISIBLES — ' + s.erreur); return; }
+  log('  ' + etiquette + ' ' + canvas.width + 'x' + canvas.height +
+      ' | luminance ' + s.min + '-' + s.max + ' (moy ' + s.moy + ')' +
+      ' | contraste ' + s.contraste + ' | opaque ' + s.opaques + '%');
+  if (s.contraste < 20) log('  >>> IMAGE QUASI UNIFORME : rien a decoder la-dedans.');
+}
+
+/* ============================================================
+   TEST 1 — code-barres dessiné par la page (Code 39)
+   ============================================================ */
+// Code 39 : 9 éléments par caractère (barre/espace alternés), n = 1 unité,
+// w = 3 unités, séparés par un espace étroit. Table réduite aux chiffres et
+// au délimiteur « * », seuls caractères utilisés ici.
+const CODE39 = {
+  '0':'nnnwwnwnn', '1':'wnnwnnnnw', '2':'nnwwnnnnw', '3':'wnwwnnnnn', '4':'nnnwwnnnw',
+  '5':'wnnwwnnnn', '6':'nnwwwnnnn', '7':'nnnwnnwnw', '8':'wnnwnnwnn', '9':'nnwwnnwnn',
+  '*':'nwnnwnwnn'
+};
+
+function dessinerCode39(texte, unite, hauteur) {
+  const motif = ('*' + texte + '*').split('').map(c => CODE39[c]).join('n');
+  const quiet = 12 * unite;
+  let largeur = quiet * 2;
+  for (const e of motif) largeur += (e === 'w' ? 3 : 1) * unite;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(largeur);
+  canvas.height = hauteur;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#000';
+
+  let x = quiet, barre = true;
+  for (const e of motif) {
+    const l = (e === 'w' ? 3 : 1) * unite;
+    if (barre) ctx.fillRect(Math.round(x), 0, Math.round(l), hauteur);
+    x += l; barre = !barre;
+  }
+  return canvas;
+}
+
+document.getElementById('btn-t1').addEventListener('click', () => {
+  const btn = document.getElementById('btn-t1');
+  btn.disabled = true;
+  titre('TEST 1 — DECODAGE SANS CAMERA');
+  try {
+    const attendu = '12345';
+    const canvas = dessinerCode39(attendu, 3, 110);
+    const aff = document.getElementById('cv-ref');
+    aff.width = canvas.width; aff.height = canvas.height;
+    aff.getContext('2d').drawImage(canvas, 0, 0);
+    aff.style.display = 'block';
+
+    log('code dessine : *' + attendu + '* (Code 39)');
+    logStats(canvas, 'reference');
+    const lu = essayer(canvas, 'ref');
+
+    if (lu === attendu) {
+      log('VERDICT 1 : OK — ZXing decode correctement sur cet appareil.');
+      log('            Le probleme est donc dans l image fournie par la camera.');
+    } else if (lu) {
+      log('VERDICT 1 : BIZARRE — lu « ' + lu +' » au lieu de « ' + attendu + ' ».');
+    } else {
+      log('VERDICT 1 : ECHEC — ZXing ne decode meme pas une image parfaite.');
+      log('            Le decodeur lui-meme est en cause sur ce navigateur.');
+    }
+  } catch (err) {
+    log('TEST 1 INTERROMPU : ' + (err && err.stack || err));
+  }
+  btn.disabled = false;
+});
+
+/* ============================================================
+   TEST 2 — photo, chaîne identique à celle de l'application
+   ============================================================ */
+function imageToCanvas(file, maxDim) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        const natif = width + 'x' + height;
+        if (width > maxDim || height > maxDim) {
+          const ratio = Math.min(maxDim / width, maxDim / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.natif = natif;
+        resolve(canvas);
+      };
+      img.onerror = () => reject(new Error('img.onerror — image illisible'));
+      img.src = e.target.result;
+    };
+    reader.onerror = () => reject(reader.error || new Error('FileReader'));
+    reader.readAsDataURL(file);
+  });
+}
+
+document.getElementById('f-photo').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  titre('TEST 2 — PHOTO');
+  log('fichier : ' + file.type + ' | ' + Math.round(file.size / 1024) + ' Ko');
+  try {
+    for (const taille of [1600, 2400]) {
+      const canvas = await imageToCanvas(file, taille);
+      log('redimensionne a ' + taille + ' (natif ' + canvas.natif + ')');
+      logStats(canvas, 'photo' + taille);
+      essayer(canvas, 'ph' + taille);
+      if (taille === 1600) {
+        const aff = document.getElementById('cv-photo');
+        aff.width = canvas.width; aff.height = canvas.height;
+        aff.getContext('2d').drawImage(canvas, 0, 0);
+        aff.style.display = 'block';
+      }
+      await new Promise(r => setTimeout(r, 0));
+    }
+    log('VERDICT 2 : comparer avec le test 1 — si 1 passe et 2 echoue,');
+    log('            c est la photo (nettete, orientation) qui est en cause.');
+  } catch (err) {
+    log('TEST 2 INTERROMPU : ' + (err && (err.stack || err.message) || err));
+  }
+});
+
+/* ============================================================
+   TEST 3 — caméra en direct
+   ============================================================ */
+let flux = null;
+
+document.getElementById('btn-cam').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-cam');
+  btn.disabled = true;
+  titre('TEST 3 — CAMERA');
+  // Contraintes copiées telles quelles depuis l'application.
+  const contraintes = {
+    audio: false,
+    video: {
+      facingMode: { ideal: 'environment' },
+      width:  { ideal: 1920 },
+      height: { ideal: 1080 },
+      frameRate: { ideal: 30 },
+      focusMode: 'continuous',
+      advanced: [{ focusMode: 'continuous' }, { exposureMode: 'continuous' }, { whiteBalanceMode: 'continuous' }]
+    }
+  };
+  try {
+    flux = await navigator.mediaDevices.getUserMedia(contraintes);
+    const video = document.getElementById('video');
+    video.srcObject = flux;
+    video.style.display = 'block';
+    await video.play();
+
+    const track = flux.getVideoTracks()[0];
+    const st = track.getSettings ? track.getSettings() : {};
+    log('track    : ' + (track.label || '?'));
+    log('settings : ' + st.width + 'x' + st.height + ' @' + st.frameRate +
+        ' fps | facingMode=' + st.facingMode + ' focusMode=' + st.focusMode);
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    log('capabilities : focusMode=' + JSON.stringify(caps.focusMode) +
+        ' torch=' + JSON.stringify(caps.torch) +
+        ' | resolution max ' + (caps.width && caps.width.max) + 'x' + (caps.height && caps.height.max));
+    // L'écart entre la taille du flux et celle rendue par <video> révèle une
+    // rotation appliquée à l'affichage mais pas aux pixels décodés.
+    log('video element : ' + video.videoWidth + 'x' + video.videoHeight +
+        ' (flux ' + st.width + 'x' + st.height + ')');
+    if (video.videoWidth && st.width && video.videoWidth !== st.width) {
+      log('>>> ECART flux / element video : orientation probablement differente.');
+    }
+    document.getElementById('btn-grab').disabled = false;
+    log('Cadre un code-barres, puis appuie sur « Capturer et decoder ».');
+  } catch (err) {
+    log('CAMERA REFUSEE : ' + (err && err.name) + ' — ' + (err && err.message));
+    log('>>> getUserMedia a echoue : tester sans la contrainte focusMode.');
+  }
+  btn.disabled = false;
+});
+
+document.getElementById('btn-grab').addEventListener('click', () => {
+  const video = document.getElementById('video');
+  if (!video.videoWidth) { log('Pas encore d image : attendre que la video demarre.'); return; }
+  titre('TEST 3b — IMAGE CAPTUREE');
+
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d', { willReadFrequently: true }).drawImage(video, 0, 0);
+
+  const aff = document.getElementById('cv-cam');
+  aff.width = canvas.width; aff.height = canvas.height;
+  aff.getContext('2d').drawImage(canvas, 0, 0);
+  aff.style.display = 'block';
+
+  logStats(canvas, 'capture');
+  const lu = essayer(canvas, 'cam');
+
+  // Même image pivotée à 90° : si elle passe alors que l'originale echoue,
+  // c'est l'orientation de la trame qui bloque le scan continu.
+  const pivot = document.createElement('canvas');
+  pivot.width = canvas.height; pivot.height = canvas.width;
+  const pc = pivot.getContext('2d', { willReadFrequently: true });
+  pc.translate(pivot.width / 2, pivot.height / 2);
+  pc.rotate(Math.PI / 2);
+  pc.drawImage(canvas, -canvas.width / 2, -canvas.height / 2);
+  const luPivot = essayer(pivot, 'cam90');
+
+  if (!lu && luPivot) log('VERDICT 3 : seule l image PIVOTEE se decode — orientation de la trame en cause.');
+  else if (lu)        log('VERDICT 3 : l image capturee se decode. Le scan continu echoue pour une autre raison (nettete, cadence).');
+  else                log('VERDICT 3 : ni droite ni pivotee. Comparer avec le test 1.');
+});
+
+/* ============================================================
+   COPIE DU RAPPORT
+   ============================================================ */
+document.getElementById('btn-copier').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-copier');
+  const texte = lignes.join('\n');
+  try {
+    await navigator.clipboard.writeText(texte);
+    btn.textContent = 'Rapport copie';
+  } catch (err) {
+    const ta = document.createElement('textarea');
+    ta.value = texte;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); btn.textContent = 'Rapport copie'; }
+    catch (e2) { btn.textContent = 'Copie impossible — selectionner le texte'; }
+    document.body.removeChild(ta);
+  }
+  setTimeout(() => { btn.textContent = 'Copier le rapport'; }, 2500);
+});
+
+window.addEventListener('error', (e) => log('ERREUR JS : ' + e.message + ' @' + e.lineno));
+window.addEventListener('beforeunload', () => { if (flux) flux.getTracks().forEach(t => t.stop()); });
+</script>
+</body>
+</html>
