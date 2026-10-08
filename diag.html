@@ -23,6 +23,11 @@
                   background:var(--vert); color:#fff; text-align:center; margin-bottom:8px; }
   input[type=file] { display:none; }
   canvas, video { max-width:100%; border:1px solid #d8d8dd; border-radius:8px; display:none; margin-top:8px; }
+  select { font:inherit; width:100%; padding:11px; border:1px solid #d8d8dd; border-radius:10px;
+           margin-bottom:8px; background:#fff; }
+  .reglage { margin:10px 0; font-size:13px; }
+  .reglage label { display:block; font-weight:600; margin-bottom:4px; }
+  .reglage input[type=range] { width:100%; }
   pre { background:#1c1c1e; color:#e8e8ed; padding:12px; border-radius:10px; font-size:11.5px;
         line-height:1.5; white-space:pre-wrap; word-break:break-word; margin:0; }
   .verdict { font-weight:700; }
@@ -33,7 +38,7 @@
 <body>
 
 <h1>Scan BL — diagnostic</h1>
-<p class="sous">Page de test, séparée de l'application. À ouvrir en <strong>navigation privée</strong>
+<p class="sous">Page de test (v2), séparée de l'application. À ouvrir en <strong>navigation privée</strong>
 (sinon le service worker renvoie l'app à la place de cette page).</p>
 
 <section>
@@ -54,10 +59,13 @@
 
 <section>
   <h2>3. Caméra en direct</h2>
-  <p class="aide">Ouvre la caméra avec les contraintes de l'app, capture une image et la décode de
-  quatre façons. Cadre un code-barres avant d'appuyer.</p>
-  <button id="btn-cam">Ouvrir la caméra</button>
+  <p class="aide">Ce téléphone expose plusieurs objectifs arrière. Commence par les lister : on
+  cherche celui qui sait faire la mise au point.</p>
+  <button id="btn-lister">Lister les caméras et leurs capacités</button>
+  <select id="sel-cam"><option value="">— défaut, comme l'application —</option></select>
+  <button id="btn-cam">Ouvrir la caméra choisie</button>
   <video id="video" playsinline muted></video>
+  <div id="reglages"></div>
   <button id="btn-grab" class="secondaire" disabled>Capturer et décoder</button>
   <canvas id="cv-cam"></canvas>
 </section>
@@ -124,9 +132,9 @@ function configurations() {
   ];
 }
 
-function essayer(canvas, etiquette) {
+function essayer(canvas, etiquette, limite) {
   let trouve = null;
-  for (const c of configurations()) {
+  for (const c of configurations().slice(0, limite || 99)) {
     const t0 = performance.now();
     let issue;
     try {
@@ -280,12 +288,18 @@ document.getElementById('f-photo').addEventListener('change', async (e) => {
   titre('TEST 2 — PHOTO');
   log('fichier : ' + file.type + ' | ' + Math.round(file.size / 1024) + ' Ko');
   try {
-    for (const taille of [1600, 2400]) {
-      const canvas = await imageToCanvas(file, taille);
-      log('redimensionne a ' + taille + ' (natif ' + canvas.natif + ')');
-      logStats(canvas, 'photo' + taille);
-      essayer(canvas, 'ph' + taille);
-      if (taille === 1600) {
+    // 1600 et 2400 sont les deux tailles de l'app. « natif » teste l'hypothese
+    // inverse : la reduction (3000x4000 -> 1200x1600, soit 2,5x) efface peut-etre
+    // des barres fines. Limite a deux configurations, TRY_HARDER sur 12 Mpx
+    // prenant plusieurs secondes.
+    let natif = null;
+    for (const e of [{ nom: '1600', max: 1600 }, { nom: '2400', max: 2400 }, { nom: 'natif', max: Infinity }]) {
+      const canvas = await imageToCanvas(file, e.max);
+      log('taille ' + e.nom + ' (natif ' + canvas.natif + ')');
+      logStats(canvas, 'ph-' + e.nom);
+      if (e.nom === 'natif') { log('  (patience : plein format, quelques secondes)'); natif = canvas; }
+      essayer(canvas, 'ph-' + e.nom, e.nom === 'natif' ? 2 : 0);
+      if (e.nom === '1600') {
         const aff = document.getElementById('cv-photo');
         aff.width = canvas.width; aff.height = canvas.height;
         aff.getContext('2d').drawImage(canvas, 0, 0);
@@ -293,8 +307,22 @@ document.getElementById('f-photo').addEventListener('change', async (e) => {
       }
       await new Promise(r => setTimeout(r, 0));
     }
-    log('VERDICT 2 : comparer avec le test 1 — si 1 passe et 2 echoue,');
-    log('            c est la photo (nettete, orientation) qui est en cause.');
+
+    // Recadrage central : si le code-barres est petit dans le cadre, le garder
+    // a sa resolution d'origine tout en jetant le decor peut suffire.
+    if (natif) {
+      const l = Math.round(natif.width * 0.6), h = Math.round(natif.height * 0.6);
+      const crop = document.createElement('canvas');
+      crop.width = l; crop.height = h;
+      crop.getContext('2d', { willReadFrequently: true })
+          .drawImage(natif, Math.round((natif.width - l) / 2), Math.round((natif.height - h) / 2), l, h, 0, 0, l, h);
+      log('recadre au centre (60 %)');
+      logStats(crop, 'ph-crop');
+      essayer(crop, 'ph-crop', 2);
+    }
+
+    log('VERDICT 2 : si une seule taille passe, c est un probleme de resolution.');
+    log('            Si aucune ne passe, la photo elle-meme est floue ou mal cadree.');
   } catch (err) {
     log('TEST 2 INTERROMPU : ' + (err && (err.stack || err.message) || err));
   }
@@ -304,39 +332,125 @@ document.getElementById('f-photo').addEventListener('change', async (e) => {
    TEST 3 — caméra en direct
    ============================================================ */
 let flux = null;
+let trackCourant = null;
+
+function arreterFlux() {
+  if (flux) flux.getTracks().forEach(t => t.stop());
+  flux = null; trackCourant = null;
+}
+
+// Résumé lisible des capacités d'un objectif : ce qui décide s'il peut servir.
+function decrireTrack(track, prefixe) {
+  const st = track.getSettings ? track.getSettings() : {};
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  log(prefixe + 'label    : ' + (track.label || '?'));
+  log(prefixe + 'settings : ' + st.width + 'x' + st.height + ' @' + st.frameRate +
+      ' fps | facingMode=' + st.facingMode + ' focusMode=' + st.focusMode);
+  log(prefixe + 'focusMode     : ' + JSON.stringify(caps.focusMode) +
+      (caps.focusMode && caps.focusMode.includes('continuous') ? '   <<< AUTOFOCUS' : '   (pas d autofocus)'));
+  log(prefixe + 'focusDistance : ' + JSON.stringify(caps.focusDistance));
+  log(prefixe + 'zoom / torch  : ' + JSON.stringify(caps.zoom) + ' / ' + JSON.stringify(caps.torch));
+  log(prefixe + 'resolution max: ' + (caps.width && caps.width.max) + 'x' + (caps.height && caps.height.max));
+  return caps;
+}
+
+document.getElementById('btn-lister').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-lister');
+  btn.disabled = true;
+  titre('TEST 3a — OBJECTIFS DISPONIBLES');
+  try {
+    // Les libellés ne sont révélés qu'une fois la permission accordée.
+    arreterFlux();
+    const amorce = await navigator.mediaDevices.getUserMedia({ video: true });
+    amorce.getTracks().forEach(t => t.stop());
+
+    const appareils = (await navigator.mediaDevices.enumerateDevices())
+      .filter(d => d.kind === 'videoinput');
+    log(appareils.length + ' camera(s) detectee(s)');
+
+    const sel = document.getElementById('sel-cam');
+    sel.innerHTML = '<option value="">— defaut, comme l application —</option>';
+
+    for (let i = 0; i < appareils.length; i++) {
+      const d = appareils[i];
+      log('');
+      log('[' + i + '] ' + (d.label || 'sans libelle') + '  (id ' + d.deviceId.slice(0, 12) + '…)');
+      sel.insertAdjacentHTML('beforeend',
+        '<option value="' + d.deviceId + '">[' + i + '] ' + (d.label || 'camera ' + i) + '</option>');
+      try {
+        // Ouverture brève, sans contrainte de résolution : on veut les capacités
+        // réelles de l'objectif, pas celles d'un mode imposé.
+        const f = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: d.deviceId } }, audio: false
+        });
+        decrireTrack(f.getVideoTracks()[0], '    ');
+        f.getTracks().forEach(t => t.stop());
+      } catch (err) {
+        log('    inaccessible : ' + (err && err.name));
+      }
+      await new Promise(r => setTimeout(r, 150));
+    }
+    log('');
+    log('>>> Choisir ci-dessus un objectif marque AUTOFOCUS, puis l ouvrir.');
+  } catch (err) {
+    log('ENUMERATION IMPOSSIBLE : ' + (err && err.name) + ' — ' + (err && err.message));
+  }
+  btn.disabled = false;
+});
+
+// Curseur pour un réglage continu (mise au point manuelle, zoom).
+function ajouterCurseur(zone, nom, cle, plage, valeur) {
+  const d = document.createElement('div');
+  d.className = 'reglage';
+  d.innerHTML = '<label>' + nom + ' : <span></span></label>' +
+    '<input type="range" min="' + plage.min + '" max="' + plage.max +
+    '" step="' + (plage.step || (plage.max - plage.min) / 100) + '" value="' + valeur + '">';
+  const sortie = d.querySelector('span'), curseur = d.querySelector('input');
+  sortie.textContent = valeur;
+  curseur.addEventListener('input', async () => {
+    sortie.textContent = curseur.value;
+    if (!trackCourant) return;
+    const c = {};
+    c[cle] = parseFloat(curseur.value);
+    // La mise au point manuelle n'est prise en compte qu'avec focusMode: manual.
+    if (cle === 'focusDistance') c.focusMode = 'manual';
+    try { await trackCourant.applyConstraints({ advanced: [c] }); }
+    catch (err) { log('applyConstraints ' + cle + ' refuse : ' + (err && err.name)); }
+  });
+  zone.appendChild(d);
+}
 
 document.getElementById('btn-cam').addEventListener('click', async () => {
   const btn = document.getElementById('btn-cam');
   btn.disabled = true;
-  titre('TEST 3 — CAMERA');
-  // Contraintes copiées telles quelles depuis l'application.
-  const contraintes = {
-    audio: false,
-    video: {
-      facingMode: { ideal: 'environment' },
-      width:  { ideal: 1920 },
-      height: { ideal: 1080 },
-      frameRate: { ideal: 30 },
-      focusMode: 'continuous',
-      advanced: [{ focusMode: 'continuous' }, { exposureMode: 'continuous' }, { whiteBalanceMode: 'continuous' }]
-    }
-  };
+  const choisi = document.getElementById('sel-cam').value;
+  titre('TEST 3 — CAMERA ' + (choisi ? 'CHOISIE' : '(defaut, comme l application)'));
+
+  // Sans choix explicite : contraintes copiées telles quelles depuis l'app.
+  const contraintes = choisi
+    ? { audio: false, video: { deviceId: { exact: choisi }, width: { ideal: 1920 }, height: { ideal: 1080 } } }
+    : {
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },
+          width:  { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30 },
+          focusMode: 'continuous',
+          advanced: [{ focusMode: 'continuous' }, { exposureMode: 'continuous' }, { whiteBalanceMode: 'continuous' }]
+        }
+      };
   try {
+    arreterFlux();
     flux = await navigator.mediaDevices.getUserMedia(contraintes);
     const video = document.getElementById('video');
     video.srcObject = flux;
     video.style.display = 'block';
     await video.play();
 
-    const track = flux.getVideoTracks()[0];
-    const st = track.getSettings ? track.getSettings() : {};
-    log('track    : ' + (track.label || '?'));
-    log('settings : ' + st.width + 'x' + st.height + ' @' + st.frameRate +
-        ' fps | facingMode=' + st.facingMode + ' focusMode=' + st.focusMode);
-    const caps = track.getCapabilities ? track.getCapabilities() : {};
-    log('capabilities : focusMode=' + JSON.stringify(caps.focusMode) +
-        ' torch=' + JSON.stringify(caps.torch) +
-        ' | resolution max ' + (caps.width && caps.width.max) + 'x' + (caps.height && caps.height.max));
+    trackCourant = flux.getVideoTracks()[0];
+    const caps = decrireTrack(trackCourant, '');
+    const st = trackCourant.getSettings ? trackCourant.getSettings() : {};
     // L'écart entre la taille du flux et celle rendue par <video> révèle une
     // rotation appliquée à l'affichage mais pas aux pixels décodés.
     log('video element : ' + video.videoWidth + 'x' + video.videoHeight +
@@ -344,11 +458,34 @@ document.getElementById('btn-cam').addEventListener('click', async () => {
     if (video.videoWidth && st.width && video.videoWidth !== st.width) {
       log('>>> ECART flux / element video : orientation probablement differente.');
     }
+
+    // Réglages manuels : la seule prise possible quand l'autofocus est absent.
+    const zone = document.getElementById('reglages');
+    zone.innerHTML = '';
+    if (caps.focusDistance) {
+      ajouterCurseur(zone, 'Mise au point manuelle', 'focusDistance', caps.focusDistance,
+                     st.focusDistance != null ? st.focusDistance : caps.focusDistance.min);
+      log('>>> Curseur de mise au point disponible : le regler jusqu a ce que le code soit net.');
+    } else if (!caps.focusMode || !caps.focusMode.includes('continuous')) {
+      log('>>> Ni autofocus ni reglage manuel sur cet objectif : il est inutilisable pour scanner.');
+    }
+    if (caps.zoom) ajouterCurseur(zone, 'Zoom', 'zoom', caps.zoom, st.zoom != null ? st.zoom : caps.zoom.min);
+    if (caps.torch) {
+      const b = document.createElement('button');
+      b.className = 'secondaire'; b.textContent = 'Torche';
+      let on = false;
+      b.addEventListener('click', async () => {
+        on = !on;
+        try { await trackCourant.applyConstraints({ advanced: [{ torch: on }] }); b.textContent = on ? 'Torche ON' : 'Torche'; }
+        catch (err) { log('torche refusee : ' + (err && err.name)); }
+      });
+      zone.appendChild(b);
+    }
+
     document.getElementById('btn-grab').disabled = false;
-    log('Cadre un code-barres, puis appuie sur « Capturer et decoder ».');
+    log('Cadre un code-barres, rends-le net, puis « Capturer et decoder ».');
   } catch (err) {
     log('CAMERA REFUSEE : ' + (err && err.name) + ' — ' + (err && err.message));
-    log('>>> getUserMedia a echoue : tester sans la contrainte focusMode.');
   }
   btn.disabled = false;
 });
@@ -357,6 +494,11 @@ document.getElementById('btn-grab').addEventListener('click', () => {
   const video = document.getElementById('video');
   if (!video.videoWidth) { log('Pas encore d image : attendre que la video demarre.'); return; }
   titre('TEST 3b — IMAGE CAPTUREE');
+  if (trackCourant && trackCourant.getSettings) {
+    const s = trackCourant.getSettings();
+    log('reglages au moment du tir : focusMode=' + s.focusMode +
+        ' focusDistance=' + s.focusDistance + ' zoom=' + s.zoom);
+  }
 
   const canvas = document.createElement('canvas');
   canvas.width = video.videoWidth;
@@ -408,7 +550,7 @@ document.getElementById('btn-copier').addEventListener('click', async () => {
 });
 
 window.addEventListener('error', (e) => log('ERREUR JS : ' + e.message + ' @' + e.lineno));
-window.addEventListener('beforeunload', () => { if (flux) flux.getTracks().forEach(t => t.stop()); });
+window.addEventListener('beforeunload', arreterFlux);
 </script>
 </body>
 </html>
